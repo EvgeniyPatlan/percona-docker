@@ -5,7 +5,7 @@ LABEL org.opencontainers.image.authors="info@percona.com"
 RUN dnf -y update; \
     dnf -y install glibc-langpack-en
 
-ENV PPG_VERSION 16.1-2
+ENV PPG_VERSION 16.2-2
 ENV OS_VER el9
 ENV FULL_PERCONA_VERSION "$PPG_VERSION.$OS_VER"
 
@@ -33,14 +33,7 @@ RUN set -ex; \
     curl -Lf -o /tmp/percona-release https://raw.githubusercontent.com/percona/percona-repositories/release-1.0-28/scripts/percona-release.sh; \
     mv /tmp/percona-release /usr/bin/; \
     chmod +x /usr/bin/percona-release; \
-    percona-release enable ppg-16.1 experimental; \
-    echo "" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo "[ppg-16.1-experimental-noarch]" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo "name = Percona Distribution for PostgreSQL 16.1 experimental/noarch YUM repository" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo 'baseurl = http://repo.percona.com/ppg-16.1/yum/experimental/$releasever/RPMS/noarch' >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo "enabled = 1" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo "gpgcheck = 1" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo; \
-    echo "gpgkey = file:///etc/pki/rpm-gpg/PERCONA-PACKAGING-KEY" >> /etc/yum.repos.d/percona-ppg-16.1-experimental.repo;
+    percona-release enable ppg-16.2 testing; \
 
 RUN set -ex; \
     dnf -y update; \
