@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+# Test image for build-rootfs.sh: installs a small package set into a DHI runtime rootfs.
+ARG DHI_RUNTIME=dhi.io/debian-base:trixie@sha256:c12f6059a81c93b872dfbc6042d8c045256db32b7e23ed5765a90b89726eac93
+ARG DHI_BUILDER=dhi.io/debian-base:trixie-dev@sha256:94571f3dc07fbc7166f6f1cbf1fe068a7647198ee2554e6b90d59a68cc8b053c
+
+FROM ${DHI_RUNTIME} AS runtime-base
+
+FROM ${DHI_BUILDER} AS builder
+USER root
+ARG PACKAGES=jq
+ARG ALLOWLIST="jq libjq1 libonig5"
+COPY --from=dhi-common setup-apt.sh build-rootfs.sh apt-preferences /opt/dhi-common/
+COPY --from=runtime-base / /rootfs
+RUN /opt/dhi-common/setup-apt.sh
+RUN set -eux; \
+    printf '%s\n' ${PACKAGES} > /tmp/packages.txt; \
+    printf '%s\n' ${ALLOWLIST} > /tmp/allowlist.txt; \
+    /opt/dhi-common/build-rootfs.sh --packages /tmp/packages.txt --allowlist /tmp/allowlist.txt \
+        --rootfs /rootfs --report /rootfs/usr/share/percona/package-origins.tsv
+
+FROM ${DHI_RUNTIME}
+COPY --from=builder /rootfs/ /

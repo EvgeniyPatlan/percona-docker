@@ -1,0 +1,14 @@
+# Package source policy for DHI-based images.
+# Prefer Docker Hardened Images and Percona packages; upstream Debian is only a
+# fallback for packages DHI does not ship (enforced by build-rootfs.sh allowlist).
+Package: *
+Pin: origin "dhi.io"
+Pin-Priority: 900
+
+Package: *
+Pin: origin "repo.percona.com"
+Pin-Priority: 900
+
+Package: *
+Pin: origin "deb.debian.org"
+Pin-Priority: 100
