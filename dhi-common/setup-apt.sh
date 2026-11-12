@@ -22,15 +22,27 @@ apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg >/dev/
 keyring=/usr/share/keyrings/percona-archive-keyring.gpg
 tmpkey="$(mktemp)"
 curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${PERCONA_KEY_FPR}" -o "$tmpkey"
+# The downloaded file must contain exactly one public key, and it must be the pinned one.
+pub_count="$(gpg --show-keys --with-colons "$tmpkey" | grep -c '^pub:' || true)"
+if [ "$pub_count" != "1" ]; then
+    echo "ERROR: expected exactly one public key in the Percona key download, found $pub_count" >&2
+    exit 1
+fi
 actual_fpr="$(gpg --show-keys --with-colons "$tmpkey" | awk -F: '/^fpr:/ {print $10; exit}')"
 if [ "$actual_fpr" != "$PERCONA_KEY_FPR" ]; then
     echo "ERROR: Percona key fingerprint mismatch: got '$actual_fpr', expected '$PERCONA_KEY_FPR'" >&2
     exit 1
 fi
-gpg --dearmor < "$tmpkey" > "$keyring"
+# Export only the pinned key from a throwaway keyring into the apt keyring.
+gnupghome="$(mktemp -d)"
+chmod 700 "$gnupghome"
+GNUPGHOME="$gnupghome" gpg --batch --quiet --import "$tmpkey"
+GNUPGHOME="$gnupghome" gpg --batch --export "$PERCONA_KEY_FPR" > "$keyring"
+[ -s "$keyring" ] || { echo "ERROR: exporting Percona key $PERCONA_KEY_FPR failed" >&2; exit 1; }
+rm -rf "$gnupghome"
 rm -f "$tmpkey"
 
 echo "deb [signed-by=${keyring}] https://repo.percona.com/${PPG_REPO_NAME}/apt ${SUITE} ${component}" \
-    > /etc/apt/sources.list.d/percona-${PPG_REPO_NAME}.list
+    > /etc/apt/sources.list.d/percona-"${PPG_REPO_NAME}".list
 install -m 0644 "$HERE/apt-preferences" /etc/apt/preferences.d/dhi-source-policy
 apt-get update -qq
