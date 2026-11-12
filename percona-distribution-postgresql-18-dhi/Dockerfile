@@ -40,7 +40,7 @@ RUN set -eux; \
     if [ -f /rootfs/etc/shadow ]; then echo 'postgres:!:20000::::::' >> /rootfs/etc/shadow; fi; \
     install -d -o 70 -g 70 -m 0700 /rootfs/var/lib/postgresql/${PG_MAJOR}/data; \
     install -d -o 70 -g 70 -m 0755 /rootfs/var/lib/postgresql; \
-    install -d -o 70 -g 70 -m 2775 /rootfs/var/run/postgresql; \
+    install -d -o 70 -g 70 -m 2775 /rootfs/run/postgresql; \
     install -d -o 70 -g 70 -m 0755 /rootfs/docker-entrypoint-initdb.d; \
     install -d -o 70 -g 70 -m 0750 /rootfs/var/lib/pgbackrest /rootfs/var/log/pgbackrest /rootfs/var/spool/pgbackrest; \
     rm -f /rootfs/etc/pgbackrest.conf; \

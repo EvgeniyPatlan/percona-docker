@@ -34,6 +34,21 @@ test_hardening() {
     [ -z "$suid" ] && pass "no setuid/setgid files" || fail "setuid/setgid files: $suid"
 }
 
+test_runtime_dirs() {
+    local d owner
+    for d in /var/run/postgresql /var/lib/postgresql /var/lib/postgresql/18/data; do
+        owner="$(sh_in "stat -L -c %u $d" 2>/dev/null || true)"
+        [ "$owner" = "70" ] && pass "$d exists, owned by uid 70" || fail "$d missing or not owned by uid 70 (owner: ${owner:-none})"
+    done
+    # Real startup smoke as uid 70: initdb, start, query over the default socket directory, stop
+    local out
+    if out="$(sh_in 'set -e; initdb -D /tmp/pgtest >/dev/null 2>&1; pg_ctl -D /tmp/pgtest -w -l /tmp/pgtest.log start >/dev/null; psql -h /var/run/postgresql -d postgres -Atc "select 1"; pg_ctl -D /tmp/pgtest -m fast -w stop >/dev/null' 2>&1)" && [ "$out" = "1" ]; then
+        pass "initdb + start + psql over /var/run/postgresql as uid 70"
+    else
+        fail "startup smoke failed: $out"
+    fi
+}
+
 test_shared_libraries() {
     local missing
     missing="$(sh_in 'shopt -s nullglob; for f in /usr/lib/postgresql/18/bin/* /usr/lib/postgresql/18/lib/*.so /usr/bin/pgbackrest; do
@@ -72,6 +87,7 @@ test_scanner_visibility() {
 
 test_components
 test_hardening
+test_runtime_dirs
 test_shared_libraries
 test_package_origins
 test_scanner_visibility
