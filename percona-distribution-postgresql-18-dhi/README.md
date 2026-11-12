@@ -316,9 +316,11 @@ is `ghcr.io` (job 3); nothing is pushed to Docker Hub. Jobs:
    `skopeo copy --all` to `ghcr.io/<lowercased repository owner>/percona-distribution-postgresql` under the tags
    `18-dhi` and `18-dhi-<short commit sha>`. `--all` keeps the index, both architectures, the SBOM and provenance
    attestation manifests and the index digest, so the pushed image is the same OCI image whose linux/amd64 variant
-   was tested and scanned in job 2. The `org.opencontainers.image.source` label (set at build time) links the
+   was tested and scanned in job 2: job 2 compares the config digest of the tar's amd64 manifest with the ID of the
+   image it loaded into the daemon and fails on a mismatch (the manifest digest itself differs after loading, because
+   the DHI base layers are decompressed for the load, but the config digest does not). The `org.opencontainers.image.source` label (set at build time) links the
    package to the repository. The job fails if the pushed index digest differs from the tar's. The summary lists
-   the pushed index digest, the tested amd64 manifest digest from job 2 (match it against the index with
+   the pushed index digest, the tested amd64 manifest digest and config digest from job 2 (match them against the index with
    `docker buildx imagetools inspect`) and the `docker pull` commands. The job has `packages: write` (all other jobs and the workflow
    default are `contents: read`) and logs in with the workflow `GITHUB_TOKEN`.
 

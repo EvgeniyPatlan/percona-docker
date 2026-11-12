@@ -90,6 +90,7 @@ jobs:
             trivyignore: percona-distribution-postgresql-18-dhi/.trivyignore
     outputs:
       amd64_digest: ${{ steps.load.outputs.amd64_digest }}
+      amd64_config: ${{ steps.load.outputs.amd64_config }}
     steps:
       - name: Check Docker Hub credentials
         env:
@@ -139,6 +140,7 @@ jobs:
 
       - name: Show tool versions
         run: |
+          skopeo --version
           trivy --version
           grype version
           jq --version
@@ -189,15 +191,27 @@ jobs:
           skopeo copy "dir:${amd64_dir}" "docker-archive:${amd64_dir}.tar:${IMAGE}"
           docker load -i "${amd64_dir}.tar"
           rm -rf "$amd64_dir" "${amd64_dir}.tar"
-          # amd64 manifest digest inside the tar's index, i.e. the image that is tested and scanned
+          # amd64 manifest and its config digest, as recorded in the tar. --dest-decompress changes the
+          # manifest (layer digests), but not the config, so the config digest ties the daemon image to the tar.
           amd64_digest="$(skopeo inspect --raw "oci-archive:${tar_path}" \
             | jq -r '[.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux")][0].digest')"
           if [ -z "$amd64_digest" ] || [ "$amd64_digest" = "null" ]; then
             echo "::error::No linux/amd64 manifest in OCI tar"
             exit 1
           fi
-          echo "amd64_digest=${amd64_digest}" >> "$GITHUB_OUTPUT"
-          echo "Tested amd64 manifest: ${amd64_digest}" | tee -a "$GITHUB_STEP_SUMMARY"
+          tar_config="$(tar -xOf "$tar_path" "blobs/sha256/${amd64_digest#sha256:}" | jq -r '.config.digest')"
+          loaded_id="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
+          if [ -z "$tar_config" ] || [ "$tar_config" = "null" ] || [ "$tar_config" != "$loaded_id" ]; then
+            echo "::error::Loaded image ${loaded_id} does not match the tar's amd64 config ${tar_config}"
+            exit 1
+          fi
+          {
+            echo "amd64_digest=${amd64_digest}"
+            echo "amd64_config=${tar_config}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "Tested amd64 image: config \`${tar_config}\` (verified equal to the loaded image ID), manifest in OCI tar \`${amd64_digest}\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Test image
         env:
@@ -273,12 +287,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Show skopeo version
+        run: skopeo --version
+
       - name: Push the tested OCI image to ghcr.io
         env:
           OWNER: ${{ github.repository_owner }}
           SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
           TESTED_AMD64: ${{ needs.build-test.outputs.amd64_digest }}
+          TESTED_CONFIG: ${{ needs.build-test.outputs.amd64_config }}
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
@@ -300,7 +318,7 @@ jobs:
             echo "### Published image"
             echo
             echo "- Index digest: \`${pushed}\` (same OCI index that build-test produced)"
-            echo "- Tested amd64 manifest (build-test): \`${TESTED_AMD64}\`"
+            echo "- Tested amd64 manifest in the tar (build-test): \`${TESTED_AMD64}\`, config \`${TESTED_CONFIG}\`"
             echo "- Tags: \`18-dhi\`, \`18-dhi-${short_sha}\`"
             echo "- Source: https://github.com/${REPO}"
             echo
