@@ -1,7 +1,8 @@
 name: DHI PostgreSQL PoC
 
 # Builds, tests and scans Percona Distribution for PostgreSQL 18 on Docker Hardened
-# Images (DHI) Debian 13. Nothing is pushed to any registry.
+# Images (DHI) Debian 13. The publish-ghcr job pushes the tested image to ghcr.io only;
+# nothing is ever pushed to Docker Hub.
 
 on:
   workflow_dispatch:
@@ -86,6 +87,7 @@ jobs:
             context: percona-distribution-postgresql-18-dhi
             image: percona-distribution-postgresql:18-dhi
             test_tag: percona/percona-distribution-postgresql:18-dhi
+            trivyignore: percona-distribution-postgresql-18-dhi/.trivyignore
     steps:
       - name: Check Docker Hub credentials
         env:
@@ -195,6 +197,7 @@ jobs:
           bash test/run.sh -t postgres-basics -t postgres-initdb "$TEST_TAG"
 
       - name: Compare with baseline
+        if: ${{ !cancelled() }}
         env:
           IMAGE: ${{ matrix.image }}
           BASELINE: ${{ inputs.baseline || env.DEFAULT_BASELINE }}
@@ -216,6 +219,105 @@ jobs:
           retention-days: 14
 
       - name: Gate on CRITICAL fixable vulnerabilities
+        if: ${{ !cancelled() }}
         env:
           IMAGE: ${{ matrix.image }}
-        run: trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+          TRIVYIGNORE: ${{ matrix.trivyignore }}
+        run: |
+          trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            --ignorefile "$TRIVYIGNORE" "$IMAGE"
+
+  publish-ghcr:
+    name: Publish to GHCR
+    needs: [verify-base, build-test]
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required to pull from dhi.io"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to dhi.io (pull bases only)
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Compute image name and tags
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "IMAGE_NAME=ghcr.io/${owner}/percona-distribution-postgresql"
+            echo "SHORT_SHA=${SHA:0:7}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and push multi-arch image to ghcr.io
+        env:
+          REPO: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-context dhi-common=dhi-common \
+            --sbom=true --provenance=mode=max \
+            --label "org.opencontainers.image.source=https://github.com/${REPO}" \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            -t "${IMAGE_NAME}:18-dhi" \
+            -t "${IMAGE_NAME}:18-dhi-${SHORT_SHA}" \
+            --metadata-file "$RUNNER_TEMP/build-metadata.json" \
+            --push \
+            percona-distribution-postgresql-18-dhi
+
+      - name: Write summary
+        run: |
+          set -euo pipefail
+          digest="$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/build-metadata.json")"
+          if [ -z "$digest" ] || [ "$digest" = "null" ]; then
+            echo "::error::No image digest in build metadata"
+            exit 1
+          fi
+          {
+            echo "### Published image"
+            echo
+            echo "- Digest: \`${digest}\`"
+            echo "- Tags: \`18-dhi\`, \`18-dhi-${SHORT_SHA}\`"
+            echo
+            echo '```'
+            echo "docker pull ${IMAGE_NAME}@${digest}"
+            echo "docker pull ${IMAGE_NAME}:18-dhi"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

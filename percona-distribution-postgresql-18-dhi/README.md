@@ -194,6 +194,19 @@ Consequence: libcurl is required by two extensions, but the curl **binary** is o
 was not checked), `/usr/bin/curl` and its 11 binary
 and 8 deb Critical matches would disappear from this image. The libcurl4t64 and libxml2 findings would stay.
 
+### 5.4 Gate ignore for the certifi advisory
+
+`percona-distribution-postgresql-18-dhi/.trivyignore` (added 2026-11-12) holds one entry, `GHSA-6q48-6c7w-9gw2`, and is
+passed to the CI gate step only (`--ignorefile`). `compare.sh` and `tests/test-image.sh` do not use it, so the
+counts in section 4 still include this finding. Justification, checked on the image:
+
+- `python3-certifi` 2025.1.31+ds (Debian, from the allowlist) is patched so that `certifi.where()` returns the system
+  bundle `/etc/ssl/certs/ca-certificates.crt`. The package ships no bundled `cacert.pem`.
+- The advisory is about the emSign roots. They are in the system bundle that comes from the DHI base
+  (`ca-certificates`), so upgrading certifi would not change exposure; see section 10.
+- Revisit when DHI ships `ca-certificates` without emSign Root CA - G1, emSign Root CA - C1 and emSign ECC Root CA - C3,
+  or when certifi leaves the allowlist.
+
 ## 6. Non-DHI content
 
 22 packages come from `deb.debian.org` through the allowlist (`allowlist.txt`, versions pinned). The image has 92
@@ -269,7 +282,7 @@ Which checks are what:
 ### SBOM and provenance of this image
 
 The CI build uses `--sbom=true --provenance=mode=max` (`.github/workflows/dhi-postgres-poc.yml`, multi-arch
-OCI output, not pushed). This attaches a BuildKit SPDX SBOM and SLSA provenance, which records the pinned base
+OCI output in the test job, pushed to ghcr.io by the publish job). This attaches a BuildKit SPDX SBOM and SLSA provenance, which records the pinned base
 digests (`DHI_RUNTIME`, `DHI_BUILDER`) as build inputs. The OCI tar is uploaded as a workflow artifact. The
 local `docker --load` build used for the numbers above has neither, which is why the table says "not queryable".
 Because `build-rootfs.sh` writes the unpacked packages into `/var/lib/dpkg/status`, syft/trivy/grype also see
@@ -280,8 +293,8 @@ check is pending the first workflow run.
 
 `.github/workflows/dhi-postgres-poc.yml` runs on `workflow_dispatch` (input `baseline`, default
 `percona/percona-distribution-postgresql:18.6.1-4`) and on pushes to `dhi-postgres-poc` that touch
-`dhi-common/**`, `percona-distribution-postgresql-18-dhi/**` or the workflow itself. Nothing is pushed to any
-registry. Jobs:
+`dhi-common/**`, `percona-distribution-postgresql-18-dhi/**` or the workflow itself. The only registry it pushes to
+is `ghcr.io` (job 3); nothing is pushed to Docker Hub. Jobs:
 
 1. **Verify DHI base images**: logs in to `dhi.io`, runs `dhi-common/verify-base.sh` for the pinned digests.
 2. **Build, test and scan**: builds the multi-arch OCI image with SBOM and provenance and uploads it; builds amd64
@@ -289,13 +302,28 @@ registry. Jobs:
    `postgres-initdb` tests from the repository's `test/` suite; runs `dhi-common/compare.sh` against the baseline and
    writes `summary.md` to the job summary; uploads all scan outputs (trivy, grype, SBOMs, dockle, origin TSV) as an
    artifact; and finally fails if trivy finds a fixable Critical vulnerability
-   (`trivy image --severity CRITICAL --ignore-unfixed --exit-code 1`).
+   (`trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 --ignorefile percona-distribution-postgresql-18-dhi/.trivyignore`,
+   see section 5.4). The compare, upload and gate steps run even when an earlier test step failed (`!cancelled()`),
+   so CVE results are not hidden by a test failure; the job still ends as failed in that case.
+3. **Publish to GHCR**: runs only after jobs 1 and 2 both succeeded, and only for `push` and `workflow_dispatch`.
+   Rebuilds the multi-arch image (`linux/amd64,linux/arm64`, SBOM, `provenance=mode=max`) and pushes it to
+   `ghcr.io/<lowercased repository owner>/percona-distribution-postgresql` with the tags `18-dhi` and
+   `18-dhi-<short commit sha>`. The OCI labels `org.opencontainers.image.source` and
+   `org.opencontainers.image.revision` are set, which links the package to the repository. The pushed digest and
+   `docker pull` commands go to the job summary. The job has `packages: write` (all other jobs and the workflow
+   default are `contents: read`) and logs in with the workflow `GITHUB_TOKEN`.
+
+Pull the published image with `docker pull ghcr.io/evgeniypatlan/percona-distribution-postgresql:18-dhi`.
+GHCR packages created under a personal account are private by default: make the package public in its package
+settings, or `docker login ghcr.io` with a token that has `read:packages`. The multi-arch OCI tar from job 2 is
+also kept as a workflow artifact for 7 days (comparison results for 14 days).
 
 Secrets (repository secrets in the fork): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, used only to log in to
-`dhi.io` and to pull the baseline. Jobs fail early with a clear message if they are not set. trivy and grype
+`dhi.io` and to pull the baseline; they are never used to log in to docker.io or to push. Jobs fail early with a clear message if they are not set. trivy and grype
 versions are pinned in the workflow (`TRIVY_VERSION`, `GRYPE_VERSION`).
 
-Note: with the current allowlist the last gate step fails today, see section 10.
+The `GHSA-6q48-6c7w-9gw2` certifi finding is ignored in the gate step only (section 5.4), so the gate passes on
+this image; it exits 1 without the ignore file.
 
 ## 9. Reproduce
 
@@ -322,18 +350,19 @@ bash dhi-common/verify-base.sh
 # or one reference
 bash dhi-common/verify-base.sh dhi.io/debian-base:trixie@sha256:c12f6059a81c93b872dfbc6042d8c045256db32b7e23ed5765a90b89726eac93
 
-# CI-equivalent vulnerability gate
-trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 percona-distribution-postgresql:18-dhi
+# CI-equivalent vulnerability gate (exit 0; without --ignorefile it exits 1 on certifi)
+trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
+  --ignorefile percona-distribution-postgresql-18-dhi/.trivyignore percona-distribution-postgresql:18-dhi
 ```
 
 `REQUIRED_PKGS_DHI` equals the script default and is shown only for explicitness.
 
 ## 10. Known limitations and next steps
 
-- **CI gate fails on a fixable Critical.** `python3-certifi` 2025.1.31 (allowlist) is flagged
-  GHSA-6q48-6c7w-9gw2, fixed in certifi 2026.10.18, which the allowlist does not provide (the pinned Debian version is 2025.1.31). The final trivy gate step
-  (`--severity CRITICAL --ignore-unfixed`) exits 1 on this image today. Options: ship certifi from the Percona
-  repo or DHI, or accept it with an explicit ignore entry.
+- **emSign roots in the DHI base trust store.** The system bundle from the DHI base `ca-certificates` (148 roots)
+  contains emSign Root CA - G1, emSign Root CA - C1 and emSign ECC Root CA - C3, which is what
+  GHSA-6q48-6c7w-9gw2 is about. The CI gate ignores that advisory (section 5.4); the exposure is in the base image
+  and is not removed by any certifi version. The `python3-certifi` 2025.1.31 package is still on the allowlist.
 - **Arbitrary UID gives a raw error.** Starting under another uid without a writable PGDATA fails with a bare
   `chmod` error. The entrypoint should check writability up front and print what to mount or which uid to use.
 - **Operator image deferred.** The operator postgres image on DHI (phase 2) was skipped by decision; nothing here

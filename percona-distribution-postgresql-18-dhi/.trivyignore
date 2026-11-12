@@ -1,0 +1,11 @@
+# GHSA-6q48-6c7w-9gw2 (certifi, emSign root removal). Added 2026-11-12.
+# Applies to the CI vulnerability gate only; compare.sh and the test scripts do not use this file.
+#
+# Debian's python3-certifi (2025.1.31+ds, from the Debian allowlist) is patched so that
+# certifi.where() returns the system bundle /etc/ssl/certs/ca-certificates.crt, and the package
+# ships no bundled cacert.pem. The emSign roots the advisory is about (emSign Root CA - G1,
+# emSign Root CA - C1, emSign ECC Root CA - C3) are in the system bundle that comes from the DHI
+# base (ca-certificates), so upgrading certifi would not change exposure.
+# Revisit when DHI ships ca-certificates without those emSign roots, or when certifi leaves the
+# allowlist.
+GHSA-6q48-6c7w-9gw2
