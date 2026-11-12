@@ -61,6 +61,7 @@ LABEL org.opencontainers.image.title="Percona Distribution for PostgreSQL ${PG_M
       org.opencontainers.image.base.name="dhi.io/debian-base:trixie"
 
 COPY --from=builder /rootfs/ /
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV LANG=en_US.UTF-8 \
     PG_MAJOR=${PG_MAJOR} \
@@ -71,4 +72,5 @@ VOLUME ["/var/lib/postgresql"]
 EXPOSE 5432
 USER 70
 STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["postgres"]
