@@ -15,12 +15,19 @@
 # Tools: trivy and grype are used from the host. syft and dockle run from pinned container
 # images (override with SYFT_IMAGE / DOCKLE_IMAGE); both need the docker socket.
 # Env: RO_WAIT_SECONDS (default 90) is how long the read-only run waits for PostgreSQL.
+# Scanner visibility: the script exits non-zero unless trivy (--list-all-pkgs) and grype (CycloneDX
+# output) both list REQUIRED_PKGS_DHI (default percona-postgresql-18, percona-patroni) for the DHI
+# image and REQUIRED_PKGS_BASELINE (default percona-postgresql18-server, percona-patroni) for the baseline.
 set -euo pipefail
 # shellcheck disable=SC2016
 
 SYFT_IMAGE="${SYFT_IMAGE:-anchore/syft:v1.57.1}"
 DOCKLE_IMAGE="${DOCKLE_IMAGE:-goodwithtech/dockle:v0.4.15}"
 RO_WAIT_SECONDS="${RO_WAIT_SECONDS:-90}"
+# Packages that both trivy and grype must list for the image, otherwise the scan is not
+# trustworthy (the scanner cannot see the database/HA packages). Space separated; override per label.
+REQUIRED_PKGS_DHI="${REQUIRED_PKGS_DHI:-percona-postgresql-18 percona-patroni}"
+REQUIRED_PKGS_BASELINE="${REQUIRED_PKGS_BASELINE:-percona-postgresql18-server percona-patroni}"
 ORIGIN_TSV_PATH=/usr/share/percona/package-origins.tsv
 DOCKER_SOCK=/var/run/docker.sock
 
@@ -49,10 +56,11 @@ tool_container() {
 run_scanners() {
     local label="$1" img="$2"
     log "trivy: $img"
-    trivy image --quiet --scanners vuln --format json --output "$OUT/trivy-$label.json" "$img" \
+    trivy image --quiet --scanners vuln --list-all-pkgs --format json --output "$OUT/trivy-$label.json" "$img" \
         || die "trivy failed for $img"
     log "grype: $img"
-    grype "docker:$img" --quiet -o json >"$OUT/grype-$label.json" || die "grype failed for $img"
+    grype "docker:$img" --quiet -o "json=$OUT/grype-$label.json" -o "cyclonedx-json=$OUT/grype-inventory-$label.json" \
+        || die "grype failed for $img"
     log "syft: $img"
     tool_container "$SYFT_IMAGE" "docker:$img" --quiet \
         -o "spdx-json=/out/sbom-$label.spdx.json" -o "cyclonedx-json=/out/sbom-$label.cdx.json" \
@@ -60,9 +68,35 @@ run_scanners() {
     log "dockle: $img"
     tool_container "$DOCKLE_IMAGE" -f json -o "/out/dockle-$label.json" "$img" \
         || die "dockle failed for $img"
-    for f in trivy grype dockle; do
+    for f in trivy grype grype-inventory dockle; do
         jq -e . "$OUT/$f-$label.json" >/dev/null || die "$f-$label.json is not valid JSON"
     done
+    check_visibility "$label"
+}
+
+# Fails unless both trivy and grype list every required package for the image.
+check_visibility() {
+    local label="$1" required pkg tool names missing=""
+    if [ "$label" = dhi ]; then required="$REQUIRED_PKGS_DHI"; else required="$REQUIRED_PKGS_BASELINE"; fi
+    for tool in trivy grype; do
+        if [ "$tool" = trivy ]; then
+            names="$(jq -r '[.Results[]?.Packages[]?.Name] | unique[]' "$OUT/trivy-$label.json")" \
+                || die "cannot read package inventory from trivy-$label.json"
+        else
+            names="$(jq -r '[.components[]?.name] | unique[]' "$OUT/grype-inventory-$label.json")" \
+                || die "cannot read package inventory from grype-inventory-$label.json"
+        fi
+        for pkg in $required; do
+            grep -qxF "$pkg" <<<"$names" || missing="$missing $tool:$pkg"
+        done
+    done
+    [ -z "$missing" ] || die "SCANNER VISIBILITY: $label image: scanners do not list:$missing (results would be invalid)"
+}
+
+visibility_cell() {
+    local required
+    if [ "$1" = dhi ]; then required="$REQUIRED_PKGS_DHI"; else required="$REQUIRED_PKGS_BASELINE"; fi
+    echo "ok: trivy and grype list ${required// /, }"
 }
 
 # --- metrics ----------------------------------------------------------------------------------
@@ -96,8 +130,8 @@ package_count() {
 
 size_cell() {
     local img="$1" raw gz
-    raw="$(docker image inspect -f '{{.Size}}' "$img")"
-    gz="$(docker save "$img" | gzip -c | wc -c)"
+    raw="$(docker image inspect -f '{{.Size}}' "$img")" || return 1
+    gz="$(docker save "$img" | gzip -c | wc -c)" || return 1
     echo "$((gz / 1024 / 1024)) MiB gzip'd save / $((raw / 1024 / 1024)) MiB uncompressed"
 }
 
@@ -108,7 +142,7 @@ presence_cell() { # image, command names...
     local img="$1"; shift
     local found
     found="$(in_image "$img" 'for c in "$@"; do p="$(command -v "$c" || true)"; [ -n "$p" ] && echo "$c"; done; true' "$@" \
-        | paste -sd, -)"
+        | paste -sd, -)" || return 1
     if [ -n "$found" ]; then echo "yes ($found)"; else echo "no"; fi
 }
 
@@ -117,14 +151,14 @@ setuid_cell() {
     n="$(in_image "$1" 'shopt -s globstar nullglob dotglob; c=0
         for f in /usr/** /etc/** /opt/** /var/**; do
             [ -f "$f" ] && [ ! -L "$f" ] && { [ -u "$f" ] || [ -g "$f" ]; } && c=$((c + 1))
-        done; echo $c')"
+        done; echo $c')" || return 1
     echo "$n"
 }
 
 root_cell() {
     local img="$1" user uid
-    user="$(docker image inspect -f '{{.Config.User}}' "$img")"
-    uid="$(docker run --rm --entrypoint id "$img" -u)"
+    user="$(docker image inspect -f '{{.Config.User}}' "$img")" || return 1
+    uid="$(docker run --rm --entrypoint id "$img" -u)" || return 1
     if [ "$uid" = 0 ]; then echo "yes (image USER '${user:-root}', uid 0)"; else echo "no (image USER '${user:-root}', uid $uid)"; fi
 }
 
@@ -213,16 +247,26 @@ fetch_origins() {
 
 # --- summary ----------------------------------------------------------------------------------
 
+# Compute both cells first so a failing or empty measurement aborts instead of printing a blank cell.
+emit_row() { # name, baseline-cell, dhi-cell
+    [ -n "$2" ] && [ -n "$3" ] || die "empty measurement for '$1'"
+    printf '| %s | %s | %s |\n' "$1" "$2" "$3"
+}
+
 metric_row() { # name, fn, args...  -> "| name | baseline | dhi |"
-    local name="$1" fn="$2"; shift 2
+    local name="$1" fn="$2" b d; shift 2
     log "measuring: $name"
-    printf '| %s | %s | %s |\n' "$name" "$("$fn" "$BASELINE" "$@")" "$("$fn" "$DHI" "$@")"
+    b="$("$fn" "$BASELINE" "$@")" || die "measurement '$name' failed for $BASELINE"
+    d="$("$fn" "$DHI" "$@")" || die "measurement '$name' failed for $DHI"
+    emit_row "$name" "$b" "$d"
 }
 
 label_row() { # name, fn, extra args: functions that take a label
-    local name="$1" fn="$2"; shift 2
+    local name="$1" fn="$2" b d; shift 2
     log "measuring: $name"
-    printf '| %s | %s | %s |\n' "$name" "$("$fn" baseline "$@")" "$("$fn" dhi "$@")"
+    b="$("$fn" baseline "$@")" || die "measurement '$name' failed for baseline"
+    d="$("$fn" dhi "$@")" || die "measurement '$name' failed for dhi"
+    emit_row "$name" "$b" "$d"
 }
 
 write_summary() {
@@ -247,6 +291,7 @@ write_summary() {
         metric_row "SBOM / provenance attached" sbom_cell
         metric_row "Read-only run" readonly_cell
         label_row "Dockle" dockle_cell
+        label_row "Scanner visibility" visibility_cell
         echo
         echo "Packages = dpkg/rpm entries in the syft inventory. CVEs are unique (id, package, version) matches;"
         echo "fixable = a fixed version is known. Size = \`docker save | gzip\` and \`docker image inspect\`."
