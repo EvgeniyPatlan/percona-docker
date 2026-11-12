@@ -194,6 +194,11 @@ Consequence: libcurl is required by two extensions, but the curl **binary** is o
 was not checked), `/usr/bin/curl` and its 11 binary
 and 8 deb Critical matches would disappear from this image. The libcurl4t64 and libxml2 findings would stay.
 
+The UBI baseline ships curl as well: `curl-minimal` and `libcurl-minimal` 7.76.1 are in the ubi9-minimal base and are
+required by `percona-postgresql18-server`, `percona-pg_tde18`, `percona-pg_oidc_validator18`, rpm and the release
+packages (checked with `rpm -q` and `--whatrequires` in `percona/percona-distribution-postgresql:18.6.1-4`). So curl is
+not a DHI regression; on DHI it is present only because of Percona's dependency.
+
 ### 5.4 Gate ignore for the certifi advisory
 
 `percona-distribution-postgresql-18-dhi/.trivyignore` (added 2026-11-12) holds one entry, `GHSA-6q48-6c7w-9gw2`, and is
@@ -297,8 +302,9 @@ check is pending the first workflow run.
 is `ghcr.io` (job 3); nothing is pushed to Docker Hub. Jobs:
 
 1. **Verify DHI base images**: logs in to `dhi.io`, runs `dhi-common/verify-base.sh` for the pinned digests.
-2. **Build, test and scan**: builds the multi-arch OCI image with SBOM and provenance and uploads it; builds amd64
-   into the daemon; runs `tests/test-image.sh`, `tests/test-entrypoint.sh` and the `postgres-basics` and
+2. **Build, test and scan**: builds the multi-arch OCI image once (SBOM, provenance, OCI source and revision
+   labels) and uploads it as an artifact; loads the linux/amd64 image from that tar into the local daemon (`skopeo`
+   and `docker load`) and records its manifest digest; runs `tests/test-image.sh`, `tests/test-entrypoint.sh` and the `postgres-basics` and
    `postgres-initdb` tests from the repository's `test/` suite; runs `dhi-common/compare.sh` against the baseline and
    writes `summary.md` to the job summary; uploads all scan outputs (trivy, grype, SBOMs, dockle, origin TSV) as an
    artifact; and finally fails if trivy finds a fixable Critical vulnerability
@@ -306,14 +312,18 @@ is `ghcr.io` (job 3); nothing is pushed to Docker Hub. Jobs:
    see section 5.4). The compare, upload and gate steps run even when an earlier test step failed (`!cancelled()`),
    so CVE results are not hidden by a test failure; the job still ends as failed in that case.
 3. **Publish to GHCR**: runs only after jobs 1 and 2 both succeeded, and only for `push` and `workflow_dispatch`.
-   Rebuilds the multi-arch image (`linux/amd64,linux/arm64`, SBOM, `provenance=mode=max`) and pushes it to
-   `ghcr.io/<lowercased repository owner>/percona-distribution-postgresql` with the tags `18-dhi` and
-   `18-dhi-<short commit sha>`. The OCI labels `org.opencontainers.image.source` and
-   `org.opencontainers.image.revision` are set, which links the package to the repository. The pushed digest and
-   `docker pull` commands go to the job summary. The job has `packages: write` (all other jobs and the workflow
+   It does not rebuild: it downloads the OCI tar artifact of the same run and copies it with
+   `skopeo copy --all` to `ghcr.io/<lowercased repository owner>/percona-distribution-postgresql` under the tags
+   `18-dhi` and `18-dhi-<short commit sha>`. `--all` keeps the index, both architectures, the SBOM and provenance
+   attestation manifests and the index digest, so the pushed image is the same OCI image whose linux/amd64 variant
+   was tested and scanned in job 2. The `org.opencontainers.image.source` label (set at build time) links the
+   package to the repository. The job fails if the pushed index digest differs from the tar's. The summary lists
+   the pushed index digest, the tested amd64 manifest digest from job 2 (match it against the index with
+   `docker buildx imagetools inspect`) and the `docker pull` commands. The job has `packages: write` (all other jobs and the workflow
    default are `contents: read`) and logs in with the workflow `GITHUB_TOKEN`.
 
-Pull the published image with `docker pull ghcr.io/evgeniypatlan/percona-distribution-postgresql:18-dhi`.
+Pull the published image with `docker pull ghcr.io/evgeniypatlan/percona-distribution-postgresql:18-dhi`
+(replace `evgeniypatlan` with your lowercased GitHub owner).
 GHCR packages created under a personal account are private by default: make the package public in its package
 settings, or `docker login ghcr.io` with a token that has `read:packages`. The multi-arch OCI tar from job 2 is
 also kept as a workflow artifact for 7 days (comparison results for 14 days).
@@ -377,4 +387,6 @@ trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
   listed only. The Rekor transparency log is not checked.
 - **Shell still present.** `sh` and `bash` remain, as agreed for the PoC. The entrypoint needs bash.
 - **No HEALTHCHECK** (Dockle CIS-DI-0006), same as the baseline.
+- **arm64 is not run or scanned.** The arm64 image is built in the same build and published in the same index, but
+  only linux/amd64 is loaded, tested and scanned in CI.
 - **Not measured:** a published-image SBOM/provenance, arm64 scan results, FIPS/STIG variants.
