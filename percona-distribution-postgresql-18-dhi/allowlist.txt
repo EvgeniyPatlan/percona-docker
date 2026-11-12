@@ -1,0 +1,31 @@
+# Packages taken from upstream Debian (deb.debian.org) because Docker Hardened Images
+# does not ship them. Format: <package> [<exact version>]. Anything not listed here
+# that resolves to deb.debian.org fails the build. Binary rebuild suffixes (+bN)
+# differ per architecture and are ignored.
+#
+# Patroni (percona-patroni) Python dependencies
+python3-cdiff 1.4.2-1
+python3-certifi 2025.1.31+ds-1
+python3-chardet 5.2.0+dfsg-2
+python3-charset-normalizer 3.4.2-1
+python3-consul 1.5.5-1
+python3-dateutil 2.9.0-4
+python3-dnspython 2.7.0-1
+python3-etcd 0.4.5-6
+python3-idna 3.10-1+deb13u1
+python3-prettytable 3.15.1-1
+python3-psutil 7.0.0-2
+python3-psycopg2 2.9.10-1
+python3-requests 2.32.3+dfsg-5+deb13u1
+python3-six 1.17.0-1
+python3-systemd 235-1
+python3-urllib3 2.3.0-3+deb13u2
+python3-yaml 6.0.2-1
+# Perl modules pulled in by percona-postgresql-common tooling
+libio-pty-perl 1:1.20-1
+libipc-run-perl 20231003.0-2
+libjson-perl 4.10000-1
+# Pulled in by percona-postgresql-common (snakeoil certificate tooling)
+ssl-cert 1.1.3
+# Lets initdb run under an arbitrary UID (entrypoint.sh)
+libnss-wrapper 1.1.16-1
