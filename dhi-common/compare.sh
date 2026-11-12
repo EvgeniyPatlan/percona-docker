@@ -12,8 +12,8 @@
 # it is used to split the DHI CVEs by package origin. The baseline has no such report and is
 # shown as a single "all" bucket.
 #
-# Tools: trivy and grype are used from the host. syft and dockle run from pinned container
-# images (override with SYFT_IMAGE / DOCKLE_IMAGE); both need the docker socket.
+# Tools: trivy and grype are used from the host. syft and dockle run from container
+# images pinned by digest (override with SYFT_IMAGE / DOCKLE_IMAGE); both need the docker socket.
 # Env: RO_WAIT_SECONDS (default 90) is how long the read-only run waits for PostgreSQL.
 # Scanner visibility: the script exits non-zero unless trivy (--list-all-pkgs) and grype (CycloneDX
 # output) both list REQUIRED_PKGS_DHI (default percona-postgresql-18, percona-patroni) for the DHI
@@ -21,8 +21,8 @@
 set -euo pipefail
 # shellcheck disable=SC2016
 
-SYFT_IMAGE="${SYFT_IMAGE:-anchore/syft:v1.57.1}"
-DOCKLE_IMAGE="${DOCKLE_IMAGE:-goodwithtech/dockle:v0.4.15}"
+SYFT_IMAGE="${SYFT_IMAGE:-anchore/syft:v1.57.1@sha256:03215d0e98b661d0ecbc8575dbc14d65be1743b5de5df6410aecb7e80f95b060}"
+DOCKLE_IMAGE="${DOCKLE_IMAGE:-goodwithtech/dockle:v0.4.15@sha256:eade932f793742de0aa8755406c7677cd7696f8675b6180926f7eeffa7abe6b9}"
 RO_WAIT_SECONDS="${RO_WAIT_SECONDS:-90}"
 # Packages that both trivy and grype must list for the image, otherwise the scan is not
 # trustworthy (the scanner cannot see the database/HA packages). Space separated; override per label.

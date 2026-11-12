@@ -305,15 +305,18 @@ jobs:
           tar_path="$RUNNER_TEMP/oci/standalone.tar"
           index_digest="$(skopeo inspect --raw "oci-archive:${tar_path}" | sha256sum | cut -d' ' -f1)"
           index_digest="sha256:${index_digest}"
-          for tag in 18-dhi "18-dhi-${short_sha}"; do
+          # Push the immutable sha tag first, then the moving 18-dhi tag; verify both digests.
+          pushed=""
+          for tag in "18-dhi-${short_sha}" 18-dhi; do
             skopeo copy --all "oci-archive:${tar_path}" "docker://${image_name}:${tag}"
+            tag_digest="$(skopeo inspect --raw "docker://${image_name}:${tag}" | sha256sum | cut -d' ' -f1)"
+            tag_digest="sha256:${tag_digest}"
+            if [ "$tag_digest" != "$index_digest" ]; then
+              echo "::error::Pushed index digest ${tag_digest} for tag ${tag} differs from the tar's ${index_digest}"
+              exit 1
+            fi
+            pushed="$tag_digest"
           done
-          pushed="$(skopeo inspect --raw "docker://${image_name}:18-dhi" | sha256sum | cut -d' ' -f1)"
-          pushed="sha256:${pushed}"
-          if [ "$pushed" != "$index_digest" ]; then
-            echo "::error::Pushed index digest ${pushed} differs from the tar's ${index_digest}"
-            exit 1
-          fi
           {
             echo "### Published image"
             echo

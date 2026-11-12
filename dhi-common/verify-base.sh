@@ -21,7 +21,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COSIGN_IMAGE="${COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.1.4}"
+COSIGN_IMAGE="${COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d}"
 DHI_PUBKEY_URL="${DHI_PUBKEY_URL:-https://registry.scout.docker.com/keyring/dhi/latest.pub}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 DOCKER_CONFIG_DIR="${DOCKER_CONFIG_DIR:-${DOCKER_CONFIG:-$HOME/.docker}}"
