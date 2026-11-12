@@ -20,7 +20,9 @@ Every package added to the runtime image must come from:
 
 - `dhi.io` (Docker Hardened Images Debian packages), or
 - `repo.percona.com`, or
-- `deb.debian.org`, **only** if the package name is listed in the image's allowlist.
+- `deb.debian.org`, **only** if the package is listed in the image's allowlist. Allowlist lines are
+  `<package> [<version>]`; when a version is given, the resolved version must match it, ignoring the
+  architecture-specific binNMU suffix (`+bN`).
 
 Anything else fails the build with `POLICY VIOLATION: <package> from <source>`. The origin of each installed
 package is written to a TSV report (`package`, `version`, `origin`), by default

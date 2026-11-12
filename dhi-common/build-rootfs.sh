@@ -50,21 +50,28 @@ classify_origin() {
 }
 
 check_policy() {
-    local violations=0 name url origin
-    read_list "$ALLOWLIST_FILE" | sort -u > "$WORK/allowlist"
+    local violations=0 name version url file origin allowed
+    # Allowlist lines: "<package> [<version>]"; a version, when given, must match (ignoring +bN binNMU suffix).
+    grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST_FILE" | awk '{print $1, ($2 == "" ? "*" : $2)}' > "$WORK/allowlist"
     # shellcheck disable=SC2046
     apt-get -o Dir::State::status="$STATUS" --print-uris download $(cat "$WORK/resolved") \
         | tr -d "'" > "$WORK/uris"
     : > "$WORK/origins"
     while read -r url file _; do
         name="${file%%_*}"
+        version="${file#*_}"; version="${version%_*}"; version="${version//%3a/:}"
         origin="$(classify_origin "$url")"
         if [ "$origin" = debian ]; then
-            if grep -qxF "$name" "$WORK/allowlist"; then
-                origin=debian-allowlist
-            else
+            allowed="$(awk -v n="$name" '$1 == n {print $2; exit}' "$WORK/allowlist")"
+            if [ -z "$allowed" ]; then
                 echo "POLICY VIOLATION: $name from deb.debian.org (not in allowlist)" >&2
                 violations=$((violations + 1))
+            # binNMU suffixes (+bN) differ per architecture, so they are not part of the pin
+            elif [ "$allowed" != "*" ] && [ "${allowed%+b[0-9]*}" != "${version%+b[0-9]*}" ]; then
+                echo "POLICY VIOLATION: $name $version from deb.debian.org (allowlist pins $allowed)" >&2
+                violations=$((violations + 1))
+            else
+                origin=debian-allowlist
             fi
         elif [ "$origin" = unknown ]; then
             echo "POLICY VIOLATION: $name from unknown source $url" >&2
