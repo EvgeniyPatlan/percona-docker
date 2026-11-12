@@ -1,0 +1,221 @@
+name: DHI PostgreSQL PoC
+
+# Builds, tests and scans Percona Distribution for PostgreSQL 18 on Docker Hardened
+# Images (DHI) Debian 13. Nothing is pushed to any registry.
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline image to compare against
+        required: false
+        default: percona/percona-distribution-postgresql:18.6.1-4
+        type: string
+  push:
+    branches:
+      - dhi-postgres-poc
+    paths:
+      - 'dhi-common/**'
+      - 'percona-distribution-postgresql-18-dhi/**'
+      - '.github/workflows/dhi-postgres-poc.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: v0.69.3
+  GRYPE_VERSION: v0.116.1
+  DEFAULT_BASELINE: percona/percona-distribution-postgresql:18.6.1-4
+
+jobs:
+  verify-base:
+    name: Verify DHI base images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required to pull from dhi.io"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to dhi.io
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify pinned base images
+        run: |
+          set -euo pipefail
+          dockerfile=percona-distribution-postgresql-18-dhi/Dockerfile
+          for arg in DHI_RUNTIME DHI_BUILDER; do
+            ref="$(sed -n "s/^ARG ${arg}=//p" "$dockerfile")"
+            if [ -z "$ref" ]; then
+              echo "::error::ARG ${arg} not found in ${dockerfile}"
+              exit 1
+            fi
+            echo "::group::verify-base ${arg} ${ref}"
+            bash dhi-common/verify-base.sh "$ref"
+            echo "::endgroup::"
+          done
+
+  build-test:
+    name: Build, test and scan (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: standalone
+            context: percona-distribution-postgresql-18-dhi
+            image: percona-distribution-postgresql:18-dhi
+            test_tag: percona/percona-distribution-postgresql:18-dhi
+    steps:
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required to pull from dhi.io"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to dhi.io
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Install trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          grype-version: ${{ env.GRYPE_VERSION }}
+
+      - name: Add grype to PATH
+        env:
+          GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          dirname "$GRYPE_CMD" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          trivy --version
+          grype version
+          jq --version
+
+      - name: Build multi-arch OCI image (no push)
+        env:
+          CONTEXT: ${{ matrix.context }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/oci"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-context dhi-common=dhi-common \
+            --sbom=true --provenance=mode=max \
+            -t "$IMAGE" \
+            --output "type=oci,dest=$RUNNER_TEMP/oci/${{ matrix.name }}.tar" \
+            "$CONTEXT"
+
+      - name: Upload OCI image artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oci-${{ matrix.name }}
+          path: ${{ runner.temp }}/oci/${{ matrix.name }}.tar
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build amd64 image into the local daemon
+        env:
+          CONTEXT: ${{ matrix.context }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-context dhi-common=dhi-common \
+            -t "$IMAGE" \
+            --load \
+            "$CONTEXT"
+
+      - name: Test image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: bash percona-distribution-postgresql-18-dhi/tests/test-image.sh "$IMAGE"
+
+      - name: Test entrypoint
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: bash percona-distribution-postgresql-18-dhi/tests/test-entrypoint.sh "$IMAGE"
+
+      - name: Run postgres-basics and postgres-initdb
+        env:
+          IMAGE: ${{ matrix.image }}
+          TEST_TAG: ${{ matrix.test_tag }}
+        run: |
+          set -euo pipefail
+          docker tag "$IMAGE" "$TEST_TAG"
+          bash test/run.sh -t postgres-basics -t postgres-initdb "$TEST_TAG"
+
+      - name: Compare with baseline
+        env:
+          IMAGE: ${{ matrix.image }}
+          BASELINE: ${{ inputs.baseline || env.DEFAULT_BASELINE }}
+          OUTDIR: ${{ runner.temp }}/compare-${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTDIR"
+          docker pull "$BASELINE"
+          bash dhi-common/compare.sh "$BASELINE" "$IMAGE" "$OUTDIR"
+          cat "$OUTDIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparison results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compare-${{ matrix.name }}
+          path: ${{ runner.temp }}/compare-${{ matrix.name }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Gate on CRITICAL fixable vulnerabilities
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
