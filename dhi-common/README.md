@@ -27,8 +27,8 @@ Every package added to the runtime image must come from:
   architecture-specific binNMU suffix (`+bN`).
 
 Anything else fails the build with `POLICY VIOLATION: <package> from <source>`. The origin of each installed
-package is written to a TSV report (`package`, `version`, `origin`), by default
-`/usr/share/percona/package-origins.tsv` in the image.
+package is written to a TSV report (`package`, `version`, `origin`) at the path given with the required `--report` option
+(the images use `/usr/share/percona/package-origins.tsv`).
 
 Maintainer scripts are not run. Images must create users, directories and symlinks they need explicitly.
 

@@ -19,7 +19,7 @@ Build model:
   (`dhi-common/build-rootfs.sh`). Maintainer scripts are not run; the Dockerfile creates the user, directories
   and locale explicitly.
 - The final stage is the unmodified runtime base with that rootfs copied over it. It has no package manager,
-  no setuid/setgid files and no gosu. A shell (`sh`, `bash`) is still present, as decided for the PoC.
+  no setuid/setgid files and no gosu. A shell (`sh`, `bash`) is still present because the entrypoint needs bash.
 - Both base images are pinned by digest in the Dockerfile (`DHI_RUNTIME`, `DHI_BUILDER`).
 - Package source policy: every package comes from `dhi.io`, `repo.percona.com`, or from an explicit,
   version-pinned allowlist of `deb.debian.org` packages (`allowlist.txt`). Anything else fails the build.
@@ -27,8 +27,8 @@ Build model:
   See `dhi-common/README.md`.
 - Only the PG18 image is covered here.
 
-Not in this PoC: the operator postgres image (`postgresql-containers/build/postgres`) on DHI was deferred by
-decision. Nothing in this directory is meant to be a drop-in replacement for it.
+Not in this PoC: the operator postgres image (`postgresql-containers/build/postgres`) on DHI is out of scope.
+Nothing in this directory is meant to be a drop-in replacement for it.
 
 ## 2. Build and run
 
@@ -43,7 +43,8 @@ docker run -d --name pg -e POSTGRES_PASSWORD=secret -p 5432:5432 \
 psql -h 127.0.0.1 -U postgres        # password: secret
 ```
 
-`PPG_REPO` (`release` default, `testing`, `experimental`) and `PG_MAJOR` are build args.
+`PPG_REPO` (`release` default, `testing`, `experimental`) is a build arg. `PG_MAJOR` is also a build arg but must stay
+`18` for now: `packages.txt`, `entrypoint.sh`, the tests and the workflow hardcode 18.
 
 The entrypoint is derived from the upstream docker-library postgres entrypoint and supports the usual
 environment: `POSTGRES_PASSWORD[_FILE]`, `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_INITDB_ARGS`,
@@ -53,7 +54,7 @@ Hardened run (verified to start and become ready, see the Read-only row in the r
 
 ```bash
 docker run -d --read-only --cap-drop=ALL --security-opt no-new-privileges \
-    --tmpfs /run/postgresql --tmpfs /tmp -v pgdata:/var/lib/postgresql \
+    --tmpfs /var/run/postgresql:uid=70,gid=70 --tmpfs /tmp -v pgdata:/var/lib/postgresql \
     -e POSTGRES_PASSWORD=secret percona-distribution-postgresql:18-dhi
 ```
 
@@ -65,7 +66,7 @@ docker run -d --read-only --cap-drop=ALL --security-opt no-new-privileges \
 | PGDATA | `/data/db` | `/var/lib/postgresql/18/data` (volume `/var/lib/postgresql`) |
 | Binaries | `/usr/pgsql-18/bin` | `/usr/lib/postgresql/18/bin` (on `PATH`) |
 | Privilege drop | gosu | none; no gosu in the image |
-| Root | tolerated by the entrypoint | the entrypoint refuses to run as uid 0 with an explicit error |
+| Root | the image `USER` is 26; if started as root, the entrypoint drops to `postgres` with gosu | the entrypoint refuses to run as uid 0 with an explicit error |
 | Package manager | dnf, microdnf, rpm | none |
 
 Behaviour to know about:
@@ -99,8 +100,8 @@ Images compared:
   `sha256:7361ff2b130244f826520a4b408eba7a870339162b2d0d45f81bde3a641cca44`.
 - DHI bases: `DHI_RUNTIME` `sha256:c12f6059a81c93b872dfbc6042d8c045256db32b7e23ed5765a90b89726eac93`,
   `DHI_BUILDER` `sha256:94571f3dc07fbc7166f6f1cbf1fe068a7647198ee2554e6b90d59a68cc8b053c`.
-- Percona packages in the DHI image: percona-postgresql-18 3:18.6-1, percona-patroni 1:4.1.5-1,
-  percona-pgbackrest 1:2.59.1-1, percona-pg-tde18 1:2.2.2-1.
+- Percona packages in the DHI image: percona-postgresql-18 3:18.6-1.trixie, percona-patroni 1:4.1.5-1.trixie,
+  percona-pgbackrest 1:2.59.1-1.trixie, percona-pg-tde18 1:2.2.2-1.trixie.
 
 | Metric | UBI baseline | DHI PoC |
 |---|---|---|
@@ -118,6 +119,8 @@ Images compared:
 | `--read-only --cap-drop=ALL --security-opt no-new-privileges` | works | works |
 | Dockle (CIS-DI) | fatal 0, warn 0, info 3, pass 13 | fatal 0, warn 0, info 2, pass 14 |
 | Scanner visibility | trivy and grype list percona-postgresql18-server, percona-patroni | trivy and grype list percona-postgresql-18, percona-patroni |
+
+Totals include Unknown/Negligible severities not shown in the C/H/M/L breakdown.
 
 CVEs are unique (id, package, version) matches; fixable means a fixed version is known. The two scanners
 disagree strongly on the DHI image, see section 5. Compare each tool only against itself (baseline vs DHI);
@@ -164,7 +167,7 @@ Treat the Critical count as scanner-dependent and use the fixable counts and the
 ### 5.2 Docker's VEX for DHI
 
 DHI publishes an OpenVEX attestation (`https://openvex.dev/ns/v0.2.0`) for each base image; `verify-base.sh`
-verifies its signature (section 7). I extracted the one for the pinned runtime base and applied it to this image
+verifies its signature (section 7). The one for the pinned runtime base was extracted and applied to this image
 on 2026-11-12:
 
 - The statement set is small: 125 statements, 124 `not_affected` and 1 `under_investigation`, covering base
@@ -178,7 +181,7 @@ on 2026-11-12:
 
 Conclusion: the VEX is useful for the base packages, but it needs a purl normalisation step to be consumed by
 trivy/grype and does not address the findings that matter here (curl, libxml2, certifi). Making VEX part of the CI
-comparison is a next step; DHI's VEX statements also do not extend to packages we add ourselves.
+comparison is a next step; DHI's VEX statements also do not extend to packages added on top of the base.
 
 ### 5.3 Which Percona package pulls in curl and libcurl
 
@@ -221,7 +224,7 @@ packages from DHI and 22 from Percona (136 in the origin report in total).
 |---|---|
 | `python3-yaml python3-psycopg2 python3-requests python3-urllib3 python3-certifi python3-charset-normalizer python3-idna python3-chardet python3-psutil python3-dnspython python3-consul python3-etcd python3-dateutil python3-prettytable python3-six python3-cdiff python3-systemd` | Python dependencies of `percona-patroni`. |
 | `libjson-perl libipc-run-perl libio-pty-perl` | Perl modules used by the `percona-postgresql-common` tooling. |
-| `ssl-cert` | Dependency of `percona-postgresql-common` (snakeoil certificate tooling). |
+| `ssl-cert` | Dependency of `percona-postgresql-common` and also a direct dependency of `percona-postgresql-18` (snakeoil certificate tooling). |
 | `libnss-wrapper` | Lets `initdb` run under an arbitrary UID (used by `entrypoint.sh`). |
 
 Findings from these: 5 grype matches (4 High, 1 Medium), plus the `certifi` Critical that is counted as
@@ -235,9 +238,10 @@ Ways to close the gap:
    build or bundle its Python dependencies (as a virtualenv or `percona-patroni-deps` package) so they become
    `percona` origin, under Percona's control and update cadence. This also solves the stale certifi problem.
 3. **Drop the dependency.**
-   - The Perl modules and `ssl-cert` come with the `percona-postgresql-common` tooling. A container does not
-     need cluster-management tooling, so splitting that package or relaxing the dependency would remove four
-     allowlist packages (not tested).
+   - The Perl modules come with the `percona-postgresql-common` tooling. A container does not need
+     cluster-management tooling, so splitting that package or relaxing the dependency would remove three
+     allowlist packages (the Perl modules; not tested). `ssl-cert` would stay, because `percona-postgresql-18`
+     also depends on it.
    - `libnss-wrapper` could be dropped by supporting only uid 70, at the cost of arbitrary-UID support.
    - A variant without Patroni would remove the 17 Python packages, at the cost of dropping Patroni.
 
@@ -287,12 +291,12 @@ Which checks are what:
 ### SBOM and provenance of this image
 
 The CI build uses `--sbom=true --provenance=mode=max` (`.github/workflows/dhi-postgres-poc.yml`, multi-arch
-OCI output in the test job, pushed to ghcr.io by the publish job). This attaches a BuildKit SPDX SBOM and SLSA provenance, which records the pinned base
+OCI output in the test job, pushed to ghcr.io by the publish job). This attaches a BuildKit SPDX SBOM and SLSA provenance, which is expected to record the pinned base
 digests (`DHI_RUNTIME`, `DHI_BUILDER`) as build inputs. The OCI tar is uploaded as a workflow artifact. The
 local `docker --load` build used for the numbers above has neither, which is why the table says "not queryable".
 Because `build-rootfs.sh` writes the unpacked packages into `/var/lib/dpkg/status`, syft/trivy/grype also see
-the Percona and allowlist packages from inside the image. I have not yet inspected a CI-produced SBOM; that
-check is pending the first workflow run.
+the Percona and allowlist packages from inside the image. The provenance and SBOM content is to be confirmed on the
+first CI run; no CI-produced SBOM has been inspected yet.
 
 ## 8. CI
 
@@ -304,7 +308,7 @@ is `ghcr.io` (job 3); nothing is pushed to Docker Hub. Jobs:
 1. **Verify DHI base images**: logs in to `dhi.io`, runs `dhi-common/verify-base.sh` for the pinned digests.
 2. **Build, test and scan**: builds the multi-arch OCI image once (SBOM, provenance, OCI source and revision
    labels) and uploads it as an artifact; loads the linux/amd64 image from that tar into the local daemon (`skopeo`
-   and `docker load`) and records its manifest digest; runs `tests/test-image.sh`, `tests/test-entrypoint.sh` and the `postgres-basics` and
+   and `docker load`) and records its amd64 manifest and config digests, then checks the config digest against the loaded image ID; runs `tests/test-image.sh`, `tests/test-entrypoint.sh` and the `postgres-basics` and
    `postgres-initdb` tests from the repository's `test/` suite; runs `dhi-common/compare.sh` against the baseline and
    writes `summary.md` to the job summary; uploads all scan outputs (trivy, grype, SBOMs, dockle, origin TSV) as an
    artifact; and finally fails if trivy finds a fixable Critical vulnerability
@@ -331,7 +335,7 @@ settings, or `docker login ghcr.io` with a token that has `read:packages`. The m
 also kept as a workflow artifact for 7 days (comparison results for 14 days).
 
 Secrets (repository secrets in the fork): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, used only to log in to
-`dhi.io` and to pull the baseline; they are never used to log in to docker.io or to push. Jobs fail early with a clear message if they are not set. trivy and grype
+`dhi.io`; the baseline and tool images are pulled from Docker Hub anonymously. They are never used to log in to docker.io or to push. Jobs fail early with a clear message if they are not set. trivy and grype
 versions are pinned in the workflow (`TRIVY_VERSION`, `GRYPE_VERSION`).
 
 The `GHSA-6q48-6c7w-9gw2` certifi finding is ignored in the gate step only (section 5.4), so the gate passes on
@@ -377,7 +381,7 @@ trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
   and is not removed by any certifi version. The `python3-certifi` 2025.1.31 package is still on the allowlist.
 - **Arbitrary UID gives a raw error.** Starting under another uid without a writable PGDATA fails with a bare
   `chmod` error. The entrypoint should check writability up front and print what to mount or which uid to use.
-- **Operator image deferred.** The operator postgres image on DHI (phase 2) was skipped by decision; nothing here
+- **Operator image deferred.** The operator postgres image on DHI (phase 2) is out of scope; nothing here
   covers `postgresql-containers/build/postgres`, its entrypoint, or the changes the operator would need
   (user, paths and PGDATA differ from today's).
 - **curl dependency.** Removing `Depends: curl` from `percona-postgresql-18` would remove the curl binary and about
@@ -387,7 +391,7 @@ trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
   only.
 - **Image signature not verified.** `verify-base.sh` verifies attestations; the cosign signature on the index is
   listed only. The Rekor transparency log is not checked.
-- **Shell still present.** `sh` and `bash` remain, as agreed for the PoC. The entrypoint needs bash.
+- **Shell still present.** `sh` and `bash` remain; the entrypoint needs bash.
 - **No HEALTHCHECK** (Dockle CIS-DI-0006), same as the baseline.
 - **arm64 is not run or scanned.** The arm64 image is built in the same build and published in the same index, but
   only linux/amd64 is loaded, tested and scanned in CI.
